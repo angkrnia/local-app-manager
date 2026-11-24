@@ -1,0 +1,46 @@
+appId: com.localappmanager.desktop
+productName: Local App Manager
+copyright: Copyright © 2026 Local App Manager
+directories:
+  output: release
+  buildResources: resources
+files:
+  - out/**/*
+  - package.json
+  - '!node_modules/**/*'
+extraResources:
+  - from: resources
+    to: .
+    filter:
+      - '*.png'
+      - '*.ico'
+win:
+  icon: resources/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+# The UI is English-only; shipping 55 Chromium locales costs ~47 MB on disk.
+electronLanguages:
+  - en-US
+  - id
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Local App Manager
+  artifactName: Local-App-Manager-Setup-${version}.exe
+portable:
+  artifactName: Local-App-Manager-Portable-${version}.exe
+compression: normal
+npmRebuild: false
+publish:
+  provider: github
+  owner: angkrnia
+  repo: local-app-manager
+  releaseType: release

@@ -1,0 +1,185 @@
+import { useEffect, useMemo, useState } from 'react'
+import { Globe2, Loader2, Rocket, ShieldAlert } from 'lucide-react'
+import type { Application } from '@shared/types'
+import { errorMessage } from '@/lib/api'
+import { run } from '@/lib/run'
+import { useExposure } from '@/components/shared/exposure-provider'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
+
+export function QuickTunnelDialog({
+  open,
+  onOpenChange,
+  applications,
+  defaultApplicationId
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  applications: Application[]
+  defaultApplicationId?: string | null
+}): React.JSX.Element {
+  const { ensureAccepted } = useExposure()
+  const [applicationId, setApplicationId] = useState(defaultApplicationId ?? '')
+  const [name, setName] = useState('')
+  const [startNow, setStartNow] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    setApplicationId(defaultApplicationId ?? applications[0]?.id ?? '')
+    setName('')
+    setStartNow(true)
+    setError(null)
+    // Intentionally only resets when the dialog opens; live application updates
+    // must not overwrite what the user is typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, defaultApplicationId])
+
+  const selected = useMemo(
+    () => applications.find((application) => application.id === applicationId) ?? null,
+    [applications, applicationId]
+  )
+
+  const submit = async (): Promise<void> => {
+    if (!applicationId) {
+      setError('Select an application to expose.')
+      return
+    }
+    if (startNow && !(await ensureAccepted())) return
+
+    setBusy(true)
+    setError(null)
+    const tunnel = await run(
+      () =>
+        window.api.tunnels.createQuick({
+          applicationId,
+          name: name.trim() || undefined,
+          startNow
+        }),
+      {
+        loading: startNow ? 'Creating and starting Quick Tunnel…' : 'Creating Quick Tunnel…',
+        success: (created) =>
+          startNow && created.publicUrl
+            ? `Public URL: ${created.publicUrl}`
+            : 'Quick Tunnel created',
+        error: 'Could not create Quick Tunnel'
+      }
+    )
+    setBusy(false)
+    if (tunnel) onOpenChange(false)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => (!busy ? onOpenChange(next) : undefined)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Rocket className="size-4 text-primary" />
+            New Quick Tunnel
+          </DialogTitle>
+          <DialogDescription>
+            Cloudflare Quick Tunnels give you a temporary <span className="font-mono">trycloudflare.com</span>{' '}
+            URL with no account required. The URL changes every time the tunnel restarts.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label>Application</Label>
+            {applications.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+                Add an application first, then create a tunnel for it.
+              </p>
+            ) : (
+              <Select value={applicationId} onValueChange={setApplicationId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select an application" />
+                </SelectTrigger>
+                <SelectContent>
+                  {applications.map((application) => (
+                    <SelectItem key={application.id} value={application.id}>
+                      {application.name}
+                      {application.status === 'running' ? '' : ' (stopped)'}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {selected && selected.status !== 'running' && (
+              <p className="text-[11px] text-warning">
+                {selected.name} is not running. Start it first, or use Start &amp; Expose from the Applications
+                page.
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="quick-name">Label (optional)</Label>
+            <Input
+              id="quick-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="e.g. Client demo"
+              maxLength={63}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Only shown inside Local App Manager. Quick Tunnel URLs are generated by Cloudflare.
+            </p>
+          </div>
+
+          <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-border px-3 py-2.5">
+            <Switch checked={startNow} onCheckedChange={setStartNow} />
+            <span>
+              <span className="block text-xs font-medium">Start the tunnel immediately</span>
+              <span className="block text-[11px] text-muted-foreground">
+                Waiting for the public URL can take 10–20 seconds.
+              </span>
+            </span>
+          </label>
+
+          <div className="flex gap-2 rounded-lg border border-warning/25 bg-warning/[0.06] px-3 py-2.5 text-[11px] text-muted-foreground">
+            <ShieldAlert className="mt-0.5 size-3.5 shrink-0 text-warning" />
+            <p>
+              This URL is public. Anyone with the link can reach your local application. Stop the tunnel when you
+              are done.
+            </p>
+          </div>
+
+          {error && (
+            <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {error}
+            </p>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" disabled={busy} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button disabled={busy || applications.length === 0} onClick={() => void submit()}>
+            {busy ? <Loader2 className="animate-spin" /> : <Globe2 />}
+            {startNow ? 'Create & start' : 'Create tunnel'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
