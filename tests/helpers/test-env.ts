@@ -67,6 +67,10 @@ process.on('SIGINT', () => { clearInterval(keepAlive); process.exit(0); });
 
 export class FakeCloudflaredProvider implements CloudflaredProvider {
   shouldFail = false
+  authenticated = false
+  remoteTunnels: NamedTunnelRemote[] = []
+  deletedRemoteTunnels: string[] = []
+  deleteRemoteError: Error | null = null
   constructor(private readonly scriptPath: string) {}
 
   async getBinary(): Promise<CloudflaredBinary> {
@@ -99,18 +103,35 @@ export class FakeCloudflaredProvider implements CloudflaredProvider {
   }
 
   getAuthStatus(): NamedAuthStatus {
-    return { authenticated: false, certPath: '', originCertExists: false }
+    return { authenticated: this.authenticated, certPath: '', originCertExists: this.authenticated }
   }
 
   async listTunnels(): Promise<NamedTunnelRemote[]> {
-    return []
+    return [...this.remoteTunnels]
   }
 
   async createTunnel(name: string): Promise<NamedTunnelRemote> {
-    return { id: '00000000-0000-0000-0000-000000000001', name, createdAt: new Date().toISOString(), connections: 0 }
+    const remote = {
+      id: '00000000-0000-0000-0000-000000000001',
+      name,
+      createdAt: new Date().toISOString(),
+      connections: 0
+    }
+    this.remoteTunnels.push(remote)
+    return remote
   }
 
   async routeDns(): Promise<void> {}
+
+  async deleteTunnel(nameOrId: string): Promise<void> {
+    if (this.deleteRemoteError) {
+      throw this.deleteRemoteError
+    }
+    this.deletedRemoteTunnels.push(nameOrId)
+    this.remoteTunnels = this.remoteTunnels.filter(
+      (tunnel) => tunnel.name !== nameOrId && tunnel.id !== nameOrId
+    )
+  }
 }
 
 export interface TestHarness {

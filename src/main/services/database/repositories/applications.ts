@@ -14,7 +14,7 @@ interface RawApplicationRow {
   start_command: string
   stop_command: string | null
   local_host: string
-  local_port: number
+  local_port: number | null
   environment_variables: string
   auto_start: number
   created_at: string
@@ -47,7 +47,7 @@ function toRecord(row: RawApplicationRow): ApplicationRecord {
     startCommand: row.start_command,
     stopCommand: row.stop_command,
     localHost: row.local_host,
-    localPort: Number(row.local_port),
+    localPort: row.local_port === null || row.local_port === undefined ? null : Number(row.local_port),
     environmentVariables: parseEnvironmentVariables(row.environment_variables),
     autoStart: Number(row.auto_start) === 1,
     createdAt: row.created_at,

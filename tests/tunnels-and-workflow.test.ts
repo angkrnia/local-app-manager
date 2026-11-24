@@ -161,4 +161,167 @@ describe('Tunnel lifecycle, Multi-tunnel independence & Start & Expose workflow'
     await harness.applications.stop(app.id)
     expect(getActiveProcessCount()).toBe(0)
   })
+
+  it('deletes a named tunnel locally by default without touching Cloudflare remote', async () => {
+    const port = await findFreePort()
+    const app = harness.applications.create({
+      name: 'Named Local Delete App',
+      description: '',
+      projectDirectory: harness.rootDir,
+      workingDirectory: harness.rootDir,
+      applicationType: 'node',
+      startCommand: `"${process.execPath}" "${harness.serverScript}" ${port}`,
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      localPort: port,
+      environmentVariables: {},
+      autoStart: false
+    })
+
+    harness.cloudflared.authenticated = true
+    await harness.cloudflared.createTunnel('my-named-tunnel')
+    const tunnel = await harness.tunnels.createNamed({
+      applicationId: app.id,
+      tunnelName: 'my-named-tunnel',
+      hostname: 'app.example.com'
+    })
+
+    await harness.tunnels.remove(tunnel.id)
+    expect(harness.tunnelsRepo.get(tunnel.id)).toBeNull()
+    expect(harness.cloudflared.deletedRemoteTunnels).toHaveLength(0)
+  })
+
+  it('deletes a named tunnel on Cloudflare when deleteRemote is true', async () => {
+    const port = await findFreePort()
+    const app = harness.applications.create({
+      name: 'Named Remote Delete App',
+      description: '',
+      projectDirectory: harness.rootDir,
+      workingDirectory: harness.rootDir,
+      applicationType: 'node',
+      startCommand: `"${process.execPath}" "${harness.serverScript}" ${port}`,
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      localPort: port,
+      environmentVariables: {},
+      autoStart: false
+    })
+
+    harness.cloudflared.authenticated = true
+    await harness.cloudflared.createTunnel('remote-delete-tunnel')
+    const tunnel = await harness.tunnels.createNamed({
+      applicationId: app.id,
+      tunnelName: 'remote-delete-tunnel',
+      hostname: 'remote.example.com'
+    })
+
+    await harness.tunnels.remove(tunnel.id, { deleteRemote: true })
+    expect(harness.tunnelsRepo.get(tunnel.id)).toBeNull()
+    expect(harness.cloudflared.deletedRemoteTunnels).toEqual(['remote-delete-tunnel'])
+  })
+
+  it('preserves local named tunnel record if remote deletion fails', async () => {
+    const port = await findFreePort()
+    const app = harness.applications.create({
+      name: 'Named Failed Remote Delete App',
+      description: '',
+      projectDirectory: harness.rootDir,
+      workingDirectory: harness.rootDir,
+      applicationType: 'node',
+      startCommand: `"${process.execPath}" "${harness.serverScript}" ${port}`,
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      localPort: port,
+      environmentVariables: {},
+      autoStart: false
+    })
+
+    harness.cloudflared.authenticated = true
+    await harness.cloudflared.createTunnel('failing-remote-tunnel')
+    const tunnel = await harness.tunnels.createNamed({
+      applicationId: app.id,
+      tunnelName: 'failing-remote-tunnel',
+      hostname: 'fail.example.com'
+    })
+
+    harness.cloudflared.deleteRemoteError = new Error('Simulated Cloudflare API failure')
+    await expect(harness.tunnels.remove(tunnel.id, { deleteRemote: true })).rejects.toThrow(
+      /Simulated Cloudflare API failure/
+    )
+    expect(harness.tunnelsRepo.get(tunnel.id)).not.toBeNull()
+  })
+
+  it('ignores deleteRemote for quick tunnels and deletes locally', async () => {
+    const port = await findFreePort()
+    const app = harness.applications.create({
+      name: 'Quick Delete App',
+      description: '',
+      projectDirectory: harness.rootDir,
+      workingDirectory: harness.rootDir,
+      applicationType: 'node',
+      startCommand: `"${process.execPath}" "${harness.serverScript}" ${port}`,
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      localPort: port,
+      environmentVariables: {},
+      autoStart: false
+    })
+
+    const tunnel = await harness.tunnels.createQuick({ applicationId: app.id, name: 'Quick One' })
+    await harness.tunnels.remove(tunnel.id, { deleteRemote: true })
+    expect(harness.tunnelsRepo.get(tunnel.id)).toBeNull()
+    expect(harness.cloudflared.deletedRemoteTunnels).toHaveLength(0)
+  })
+
+  it('executes Start & Expose with an auto-detected port when localPort is null', async () => {
+    const port = await findFreePort()
+    const app = harness.applications.create({
+      name: 'Auto Expose App',
+      description: '',
+      projectDirectory: harness.rootDir,
+      workingDirectory: harness.rootDir,
+      applicationType: 'node',
+      startCommand: `"${process.execPath}" "${harness.serverScript}" ${port}`,
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      localPort: null,
+      environmentVariables: {},
+      autoStart: false
+    })
+
+    const result = await harness.workflow.startAndExpose(app.id)
+    expect(result.application.status).toBe('running')
+    expect(result.application.detectedPort).toBe(port)
+    expect(result.application.localUrl).toBe(`http://127.0.0.1:${port}`)
+    expect(result.tunnel.status).toBe('running')
+    expect(result.tunnel.localUrl).toBe(`http://127.0.0.1:${port}`)
+    expect(result.tunnel.publicUrl).toMatch(/^https:\/\/.+\.trycloudflare\.com$/)
+
+    await harness.workflow.stopEverything(app.id)
+    expect(getActiveProcessCount()).toBe(0)
+  })
+
+  it('rejects starting a tunnel when an auto-detect app is stopped', async () => {
+    const port = await findFreePort()
+    const app = harness.applications.create({
+      name: 'Stopped Auto App',
+      description: '',
+      projectDirectory: harness.rootDir,
+      workingDirectory: harness.rootDir,
+      applicationType: 'node',
+      startCommand: `"${process.execPath}" "${harness.serverScript}" ${port}`,
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      localPort: null,
+      environmentVariables: {},
+      autoStart: false
+    })
+
+    const tunnel = await harness.tunnels.createQuick({ applicationId: app.id, name: 'Auto Tunnel' })
+    expect(tunnel.localUrl).toBe('')
+
+    await expect(harness.tunnels.start(tunnel.id)).rejects.toThrow(
+      /auto-detect port and is not running/i
+    )
+  })
 })

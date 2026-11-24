@@ -54,7 +54,7 @@ const api: TunnelManagerApi = {
       invoke<Tunnel>(IPC.tunnels.start, id, acknowledgePublicExposure),
     stop: (id) => invoke<Tunnel>(IPC.tunnels.stop, id),
     restart: (id) => invoke<Tunnel>(IPC.tunnels.restart, id),
-    remove: (id) => invoke<void>(IPC.tunnels.remove, id),
+    remove: (id, options) => invoke<void>(IPC.tunnels.remove, id, options),
     startMany: (ids) => invoke(IPC.tunnels.startMany, ids),
     stopMany: (ids) => invoke(IPC.tunnels.stopMany, ids),
     restartMany: (ids) => invoke(IPC.tunnels.restartMany, ids),

@@ -7,6 +7,10 @@ import {
   parseCloudflaredVersion
 } from '../src/main/services/tunnel-manager/url-detector'
 import {
+  LogPortDetector,
+  extractPortsFromText
+} from '../src/main/services/application-manager/port-detector'
+import {
   applicationInputSchema,
   externalUrlSchema,
   namedTunnelInputSchema,
@@ -95,5 +99,49 @@ describe('Shared validation & security schemas', () => {
       hostname: 'demo.trycloudflare.com'
     })
     expect(named.success).toBe(false)
+  })
+
+  it('accepts null localPort for auto-detect and rejects invalid ports', () => {
+    const base = {
+      name: 'Auto Port App',
+      description: '',
+      projectDirectory: 'C:\\projects\\api',
+      workingDirectory: '',
+      applicationType: 'node' as const,
+      startCommand: 'npm run dev',
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      environmentVariables: {},
+      autoStart: false
+    }
+
+    const autoParsed = applicationInputSchema.safeParse({ ...base, localPort: null })
+    expect(autoParsed.success).toBe(true)
+    if (autoParsed.success) expect(autoParsed.data.localPort).toBeNull()
+
+    expect(applicationInputSchema.safeParse({ ...base, localPort: 0 }).success).toBe(false)
+    expect(applicationInputSchema.safeParse({ ...base, localPort: 70_000 }).success).toBe(false)
+  })
+})
+
+describe('Runtime log port extraction', () => {
+  it('extracts ports from local URLs, structured PORT output, and listen banners', () => {
+    expect(extractPortsFromText('\u001b[32mLocal: http://localhost:5173/\u001b[0m')).toEqual([5173])
+    expect(extractPortsFromText("  PORT: '7008',")).toEqual([7008])
+    expect(extractPortsFromText('{"PORT": 4100, "env": "dev"}')).toEqual([4100])
+    expect(extractPortsFromText('PORT=3001')).toEqual([3001])
+    expect(extractPortsFromText('Server listening on port 8080')).toEqual([8080])
+    expect(extractPortsFromText('Server running at 127.0.0.1:4000')).toEqual([4000])
+  })
+
+  it('ignores timestamps, dates, out-of-range numbers, and deduplicates across pushes', () => {
+    expect(extractPortsFromText('11/24/2026, 1:29:15 PM starting server')).toEqual([])
+    expect(extractPortsFromText('listening on port 70000 and port 0')).toEqual([])
+
+    const detector = new LogPortDetector()
+    detector.addCandidate(7008)
+    expect(detector.push('http://127.0.0.1:7008')).toEqual([])
+    expect(detector.push('also listening on port 8080 and http://localhost:8080')).toEqual([8080])
+    expect(detector.getCandidates()).toEqual([7008, 8080])
   })
 })

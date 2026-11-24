@@ -17,6 +17,7 @@ export function ConfirmDialog({
   onOpenChange,
   title,
   description,
+  children,
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   variant = 'destructive',
@@ -27,10 +28,11 @@ export function ConfirmDialog({
   onOpenChange: (open: boolean) => void
   title: string
   description?: React.ReactNode
+  children?: React.ReactNode
   confirmLabel?: string
   cancelLabel?: string
   variant?: 'default' | 'destructive'
-  onConfirm: () => void | Promise<void>
+  onConfirm: () => void | boolean | Promise<void | boolean>
   loading?: boolean
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false)
@@ -38,8 +40,10 @@ export function ConfirmDialog({
   const handleConfirm = async (): Promise<void> => {
     setBusy(true)
     try {
-      await onConfirm()
-      onOpenChange(false)
+      const result = await onConfirm()
+      if (result !== false) {
+        onOpenChange(false)
+      }
     } finally {
       setBusy(false)
     }
@@ -61,6 +65,7 @@ export function ConfirmDialog({
           </div>
           {description && <AlertDialogDescription>{description}</AlertDialogDescription>}
         </AlertDialogHeader>
+        {children}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={isBusy}>{cancelLabel}</AlertDialogCancel>
           <Button

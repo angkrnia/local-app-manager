@@ -140,7 +140,7 @@ export default function ApplicationsPage(): React.JSX.Element {
         !application.name.toLowerCase().includes(term) &&
         !(application.projectName ?? '').toLowerCase().includes(term) &&
         !application.description.toLowerCase().includes(term) &&
-        !application.localUrl.toLowerCase().includes(term)
+        !(application.localUrl ?? '').toLowerCase().includes(term)
       ) {
         return false
       }
@@ -537,17 +537,31 @@ export default function ApplicationsPage(): React.JSX.Element {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-0.5">
-                        <button
-                          type="button"
-                          onClick={() => openLocalUrl(application)}
-                          className="max-w-[190px] truncate font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
-                          title={application.localUrl}
-                        >
-                          {application.localUrl.replace(/^https?:\/\//, '')}
-                        </button>
-                        <CopyButton value={application.localUrl} label="Copy local URL" toastOnCopy={false} />
-                      </div>
+                      {application.localUrl ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => openLocalUrl(application)}
+                            className="max-w-[190px] truncate font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
+                            title={application.localUrl}
+                          >
+                            {application.localUrl.replace(/^https?:\/\//, '')}
+                          </button>
+                          {application.localPort === null && (
+                            <span
+                              className="rounded bg-muted px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-muted-foreground"
+                              title={`Auto-detected port ${application.detectedPort}`}
+                            >
+                              auto
+                            </span>
+                          )}
+                          <CopyButton value={application.localUrl} label="Copy local URL" toastOnCopy={false} />
+                        </div>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">
+                          {application.status === 'starting' ? 'Detecting port…' : 'Auto-detect'}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col items-start gap-1">
@@ -635,7 +649,10 @@ export default function ApplicationsPage(): React.JSX.Element {
                               <RotateCw />
                               Restart
                             </DropdownMenuItem>
-                            <DropdownMenuItem onSelect={() => openLocalUrl(application)}>
+                            <DropdownMenuItem
+                              onSelect={() => openLocalUrl(application)}
+                              disabled={!application.localUrl}
+                            >
                               <ExternalLink />
                               Open local URL
                             </DropdownMenuItem>

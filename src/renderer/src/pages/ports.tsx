@@ -63,7 +63,8 @@ export default function PortsPage(): React.JSX.Element {
   const appByPort = useMemo(() => {
     const map = new Map<number, string>()
     for (const app of applications) {
-      map.set(app.localPort, app.name)
+      if (app.localPort !== null) map.set(app.localPort, app.name)
+      if (app.detectedPort !== null) map.set(app.detectedPort, app.name)
     }
     return map
   }, [applications])

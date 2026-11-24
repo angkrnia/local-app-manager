@@ -1,6 +1,6 @@
 import type { Application, Tunnel, WorkflowProgress } from '@shared/types'
 import { AppError, ErrorCode, toErrorMessage } from '@shared/errors'
-import type { ApplicationManager } from '../application-manager'
+import { effectiveHost, type ApplicationManager } from '../application-manager'
 import type { TunnelManager } from '../tunnel-manager'
 import type { SettingsService } from '../settings'
 import type { EventBus } from '../event-bus'
@@ -49,16 +49,20 @@ export class WorkflowService {
       let application = this.deps.applications.get(applicationId)
 
       step = 'port-check'
-      emit('running', `Checking port ${record.localPort}...`, 15)
-      if (application.pid === null) {
-        const port = await this.deps.applications.checkPort(record.localHost, record.localPort)
-        if (port.inUse) {
-          throw new AppError(
-            ErrorCode.PORT_IN_USE,
-            `Port ${record.localPort} is already in use${port.processName ? ` by ${port.processName}` : ''}. ` +
-              'Stop that process or change the application port.'
-          )
+      if (record.localPort !== null) {
+        emit('running', `Checking port ${record.localPort}...`, 15)
+        if (application.pid === null) {
+          const port = await this.deps.applications.checkPort(record.localHost, record.localPort)
+          if (port.inUse) {
+            throw new AppError(
+              ErrorCode.PORT_IN_USE,
+              `Port ${record.localPort} is already in use${port.processName ? ` by ${port.processName}` : ''}. ` +
+                'Stop that process or change the application port.'
+            )
+          }
         }
+      } else {
+        emit('running', 'Port will be auto-detected on startup...', 15)
       }
 
       step = 'start-application'
@@ -71,17 +75,24 @@ export class WorkflowService {
 
       step = 'health-check'
       emit('running', 'Waiting for the application to respond...', 55)
+      const port = application.localPort ?? application.detectedPort
+      if (port === null) {
+        throw new AppError(
+          ErrorCode.HEALTH_CHECK_FAILED,
+          'Could not determine a listening port for the application. Check the application logs.'
+        )
+      }
       const protocol = this.deps.settings.get().defaultProtocol
       const health = await checkHttpHealth({
-        host: record.localHost === '0.0.0.0' ? '127.0.0.1' : record.localHost,
-        port: record.localPort,
+        host: effectiveHost(record.localHost),
+        port,
         protocol,
         timeoutMs: 5_000
       })
       if (!health.healthy) {
         throw new AppError(
           ErrorCode.HEALTH_CHECK_FAILED,
-          `The application is not responding at ${application.localUrl} (${health.error ?? 'no response'}). ` +
+          `The application is not responding at ${application.localUrl ?? `${effectiveHost(record.localHost)}:${port}`} (${health.error ?? 'no response'}). ` +
             'The tunnel was not created. Check the application logs.'
         )
       }

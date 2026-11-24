@@ -36,7 +36,7 @@ export interface Application {
   startCommand: string
   stopCommand: string | null
   localHost: string
-  localPort: number
+  localPort: number | null
   /** Sensitive values are returned masked; the mask marker means "keep existing value". */
   environmentVariables: Record<string, string>
   autoStart: boolean
@@ -46,9 +46,10 @@ export interface Application {
   status: ApplicationStatus
   health: HealthStatus
   pid: number | null
+  detectedPort: number | null
   startedAt: string | null
   lastError: string | null
-  localUrl: string
+  localUrl: string | null
 }
 
 export interface ApplicationInput {
@@ -61,7 +62,7 @@ export interface ApplicationInput {
   startCommand: string
   stopCommand: string | null
   localHost: string
-  localPort: number
+  localPort: number | null
   environmentVariables: Record<string, string>
   autoStart: boolean
 }
@@ -336,6 +337,10 @@ export interface RouteDnsInput {
   hostname: string
 }
 
+export interface TunnelRemoveOptions {
+  deleteRemote?: boolean
+}
+
 export interface ExportLogsInput {
   source: LogSource
   applicationId?: string
@@ -367,7 +372,7 @@ export interface TunnelManagerApi {
     start(id: string, acknowledgePublicExposure?: boolean): Promise<ApiResult<Tunnel>>
     stop(id: string): Promise<ApiResult<Tunnel>>
     restart(id: string): Promise<ApiResult<Tunnel>>
-    remove(id: string): Promise<ApiResult<void>>
+    remove(id: string, options?: TunnelRemoveOptions): Promise<ApiResult<void>>
     startMany(ids: string[]): Promise<ApiResult<BatchResult>>
     stopMany(ids: string[]): Promise<ApiResult<BatchResult>>
     restartMany(ids: string[]): Promise<ApiResult<BatchResult>>

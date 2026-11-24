@@ -27,14 +27,20 @@ import { killProcessTree, spawnShellCommand } from '../process-manager/tree-kill
 import { checkHttpHealth, waitForHealth } from '../health-check'
 import { detectLogLevel } from '../log-manager'
 import { isPortInUse } from '../../utils/net'
-import { findPortOwner } from '../../utils/port-info'
+import {
+  findListeningPortsForProcessTree,
+  findPortOwner,
+  getListeningPortNumbers
+} from '../../utils/port-info'
 import { isDirectory } from '../../utils/paths'
+import { LogPortDetector, waitForAutoDetectedPort } from './port-detector'
 
 interface RuntimeState {
   process: ManagedProcess | null
   status: ApplicationStatus
   health: HealthStatus
   pid: number | null
+  detectedPort: number | null
   startedAt: string | null
   lastError: string | null
   sessionId: string | null
@@ -58,6 +64,7 @@ function createRuntime(): RuntimeState {
     status: 'stopped',
     health: 'unknown',
     pid: null,
+    detectedPort: null,
     startedAt: null,
     lastError: null,
     sessionId: null,
@@ -98,9 +105,17 @@ export class ApplicationManager {
     return this.requireRecord(id)
   }
 
-  getLocalUrl(record: ApplicationRecord): string {
+  getEffectivePort(id: string): number | null {
+    const record = this.deps.repository.get(id)
+    if (!record) return null
+    return record.localPort ?? this.runtimes.get(id)?.detectedPort ?? null
+  }
+
+  getLocalUrl(record: ApplicationRecord): string | null {
+    const port = record.localPort ?? this.runtimes.get(record.id)?.detectedPort ?? null
+    if (port === null) return null
     const protocol = this.deps.settings.get().defaultProtocol
-    return `${protocol}://${effectiveHost(record.localHost)}:${record.localPort}`
+    return `${protocol}://${effectiveHost(record.localHost)}:${port}`
   }
 
   async checkPort(host: string, port: number): Promise<PortCheckResult> {
@@ -220,7 +235,7 @@ export class ApplicationManager {
 
     const settings = this.deps.settings.get()
     const host = effectiveHost(record.localHost)
-    if (await isPortInUse(host, record.localPort, 1_200)) {
+    if (record.localPort !== null && (await isPortInUse(host, record.localPort, 1_200))) {
       const owner = await findPortOwner(record.localPort)
       const ownerText = owner ? ` by ${owner.name} (PID ${owner.pid})` : ''
       const message = `Port ${record.localPort} is already in use${ownerText}. Stop that process or choose a different port.`
@@ -233,10 +248,23 @@ export class ApplicationManager {
     }
 
     const environment = this.decodeEnvironment(record)
-    environment.PORT = environment.PORT ?? String(record.localPort)
+    let preExistingPorts: Set<number> | null = null
+    let logDetector: LogPortDetector | null = null
+
+    if (record.localPort !== null) {
+      environment.PORT = environment.PORT ?? String(record.localPort)
+    } else {
+      preExistingPorts = await getListeningPortNumbers()
+      logDetector = new LogPortDetector()
+      const configuredPort = Number(environment.PORT)
+      if (Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65_535) {
+        logDetector.addCandidate(configuredPort)
+      }
+    }
 
     runtime.status = 'starting'
     runtime.health = 'unknown'
+    runtime.detectedPort = null
     runtime.lastError = null
     runtime.startedAt = null
     this.logApp(id, 'info', `Starting "${record.name}" with command: ${record.startCommand}`)
@@ -249,6 +277,7 @@ export class ApplicationManager {
       cwd: record.workingDirectory || record.projectDirectory,
       env: environment,
       onLine: (line, stream) => {
+        logDetector?.push(line)
         this.logApp(
           id,
           stream === 'stderr' ? detectLogLevel(line, 'warn') : detectLogLevel(line, 'info'),
@@ -284,45 +313,86 @@ export class ApplicationManager {
       throw error
     }
 
-    const result = await waitForHealth({
-      host,
-      port: record.localPort,
-      protocol: settings.defaultProtocol,
-      timeoutMs: settings.appStartupTimeoutMs,
-      intervalMs: 1_000,
-      shouldAbort: () => !managed.running || runtime.status === 'stopping'
-    })
+    if (record.localPort !== null) {
+      const result = await waitForHealth({
+        host,
+        port: record.localPort,
+        protocol: settings.defaultProtocol,
+        timeoutMs: settings.appStartupTimeoutMs,
+        intervalMs: 1_000,
+        shouldAbort: () => !managed.running || runtime.status === 'stopping'
+      })
 
-    if (!managed.running) {
-      const message =
-        runtime.lastError ??
-        'The application process exited before it became ready. Check the application logs.'
-      runtime.status = 'error'
-      runtime.lastError = message
-      this.broadcast()
-      throw new AppError(ErrorCode.PROCESS_START_FAILED, message)
+      if (!managed.running) {
+        const message =
+          runtime.lastError ??
+          'The application process exited before it became ready. Check the application logs.'
+        runtime.status = 'error'
+        runtime.lastError = message
+        this.broadcast()
+        throw new AppError(ErrorCode.PROCESS_START_FAILED, message)
+      }
+
+      if (!result.healthy) {
+        const message =
+          `The application did not respond on ${this.getLocalUrl(record)} within ` +
+          `${Math.round(settings.appStartupTimeoutMs / 1_000)} seconds. ` +
+          `${result.lastResult?.error ?? ''} The process is still running; check the logs.`.trim()
+        runtime.status = 'error'
+        runtime.health = 'unhealthy'
+        runtime.lastError = message
+        this.logApp(id, 'error', message)
+        this.recordActivity('warn', `Health check failed for "${record.name}"`, id)
+        this.broadcast()
+        throw new AppError(ErrorCode.HEALTH_CHECK_TIMEOUT, message)
+      }
+    } else {
+      const detected = await waitForAutoDetectedPort({
+        host,
+        protocol: settings.defaultProtocol,
+        timeoutMs: settings.appStartupTimeoutMs,
+        intervalMs: 1_000,
+        getPid: () => managed.pid,
+        logDetector: logDetector!,
+        preExistingPorts: preExistingPorts!,
+        shouldAbort: () => !managed.running || runtime.status === 'stopping'
+      })
+
+      if (!managed.running) {
+        const message =
+          runtime.lastError ??
+          'The application process exited before it became ready. Check the application logs.'
+        runtime.status = 'error'
+        runtime.lastError = message
+        this.broadcast()
+        throw new AppError(ErrorCode.PROCESS_START_FAILED, message)
+      }
+
+      if (!detected.healthy || detected.port === null) {
+        const message =
+          `Could not auto-detect a listening port for "${record.name}" within ` +
+          `${Math.round(settings.appStartupTimeoutMs / 1_000)} seconds. ` +
+          'The process is still running; check the logs or set a Local Port manually.'
+        runtime.status = 'error'
+        runtime.health = 'unhealthy'
+        runtime.lastError = message
+        this.logApp(id, 'error', message)
+        this.recordActivity('warn', `Port auto-detection timed out for "${record.name}"`, id)
+        this.broadcast()
+        throw new AppError(ErrorCode.HEALTH_CHECK_TIMEOUT, message)
+      }
+
+      runtime.detectedPort = detected.port
+      this.logApp(id, 'info', `Auto-detected port ${detected.port} for "${record.name}"`)
     }
 
-    if (!result.healthy) {
-      const message =
-        `The application did not respond on ${this.getLocalUrl(record)} within ` +
-        `${Math.round(settings.appStartupTimeoutMs / 1_000)} seconds. ` +
-        `${result.lastResult?.error ?? ''} The process is still running; check the logs.`.trim()
-      runtime.status = 'error'
-      runtime.health = 'unhealthy'
-      runtime.lastError = message
-      this.logApp(id, 'error', message)
-      this.recordActivity('warn', `Health check failed for "${record.name}"`, id)
-      this.broadcast()
-      throw new AppError(ErrorCode.HEALTH_CHECK_TIMEOUT, message)
-    }
-
+    const resolvedPort = record.localPort ?? runtime.detectedPort
     runtime.status = 'running'
     runtime.health = 'healthy'
     runtime.startedAt = new Date().toISOString()
     runtime.lastError = null
     this.logApp(id, 'info', `"${record.name}" is running at ${this.getLocalUrl(record)}`)
-    this.recordActivity('info', `Application "${record.name}" started on port ${record.localPort}`, id)
+    this.recordActivity('info', `Application "${record.name}" started on port ${resolvedPort}`, id)
     this.broadcast()
     return this.get(id)
   }
@@ -373,6 +443,7 @@ export class ApplicationManager {
     runtime.health = 'unknown'
     runtime.startedAt = null
     runtime.pid = null
+    runtime.detectedPort = null
     runtime.lastError = null
     this.logApp(id, 'info', `"${record.name}" stopped`)
     this.recordActivity('info', `Application "${record.name}" stopped`, id)
@@ -392,6 +463,7 @@ export class ApplicationManager {
 
     runtime.process = null
     runtime.pid = null
+    runtime.detectedPort = null
     if (runtime.sessionId) {
       this.deps.sessions.finish(runtime.sessionId, {
         status: info.expected ? 'stopped' : info.code === 0 ? 'exited' : 'crashed',
@@ -474,19 +546,47 @@ export class ApplicationManager {
     this.healthCheckRunning = true
     try {
       const protocol = this.deps.settings.get().defaultProtocol
-      const targets = [...this.runtimes.entries()].flatMap(([id, runtime]) => {
-        if (!runtime.process?.running) return []
-        if (runtime.status !== 'running' && runtime.status !== 'error') return []
+      let changed = false
+      const targets: Array<{ id: string; runtime: RuntimeState; record: ApplicationRecord; port: number }> = []
+
+      for (const [id, runtime] of this.runtimes.entries()) {
+        if (!runtime.process?.running) continue
+        if (runtime.status !== 'running' && runtime.status !== 'error') continue
         const record = this.deps.repository.get(id)
-        return record ? [{ id, runtime, record }] : []
-      })
+        if (!record) continue
+        const port = record.localPort ?? runtime.detectedPort
+        if (port !== null) {
+          targets.push({ id, runtime, record, port })
+          continue
+        }
+        if (runtime.pid !== null) {
+          const candidates = await findListeningPortsForProcessTree(runtime.pid)
+          for (const candidatePort of candidates) {
+            const probe = await checkHttpHealth({
+              host: effectiveHost(record.localHost),
+              port: candidatePort,
+              protocol,
+              timeoutMs: 2_000
+            })
+            if (probe.healthy) {
+              runtime.detectedPort = candidatePort
+              runtime.status = 'running'
+              runtime.health = 'healthy'
+              runtime.lastError = null
+              this.logApp(id, 'info', `Auto-detected port ${candidatePort} for "${record.name}"`)
+              changed = true
+              break
+            }
+          }
+        }
+      }
 
       // Probe in parallel so one unresponsive app cannot delay the others.
       const results = await Promise.allSettled(
         targets.map((target) =>
           checkHttpHealth({
             host: effectiveHost(target.record.localHost),
-            port: target.record.localPort,
+            port: target.port,
             protocol,
             timeoutMs: 2_000
           })
@@ -494,13 +594,45 @@ export class ApplicationManager {
       )
       if (this.shuttingDown) return
 
-      let changed = false
-      results.forEach((result, index) => {
+      for (let index = 0; index < results.length; index += 1) {
+        const result = results[index]
         const target = targets[index]
-        if (!target || result.status === 'rejected') return
-        const { id, runtime, record } = target
+        if (!target || !result || result.status === 'rejected') continue
+        const { id, runtime, record, port } = target
         const nextHealth: HealthStatus = result.value.healthy ? 'healthy' : 'unhealthy'
-        if (nextHealth === runtime.health) return
+
+        if (!result.value.healthy && record.localPort === null && runtime.pid !== null && runtime.process?.running) {
+          const treePorts = await findListeningPortsForProcessTree(runtime.pid)
+          let reboundPort: number | null = null
+          for (const candidatePort of treePorts) {
+            if (candidatePort === port) continue
+            const probe = await checkHttpHealth({
+              host: effectiveHost(record.localHost),
+              port: candidatePort,
+              protocol,
+              timeoutMs: 2_000
+            })
+            if (probe.healthy) {
+              reboundPort = candidatePort
+              break
+            }
+          }
+          if (reboundPort !== null) {
+            runtime.detectedPort = reboundPort
+            runtime.health = 'healthy'
+            runtime.status = 'running'
+            runtime.lastError = null
+            this.logApp(
+              id,
+              'info',
+              `Detected port change for "${record.name}": now listening on port ${reboundPort}`
+            )
+            changed = true
+            continue
+          }
+        }
+
+        if (nextHealth === runtime.health) continue
 
         runtime.health = nextHealth
         if (result.value.healthy) {
@@ -514,7 +646,7 @@ export class ApplicationManager {
           this.recordActivity('warn', `Health check failed for "${record.name}"`, id)
         }
         changed = true
-      })
+      }
       if (changed) this.broadcast()
     } finally {
       this.healthCheckRunning = false
@@ -538,6 +670,12 @@ export class ApplicationManager {
   async openLocalUrl(id: string): Promise<void> {
     const record = this.requireRecord(id)
     const url = this.getLocalUrl(record)
+    if (!url) {
+      throw new AppError(
+        ErrorCode.INVALID_STATE,
+        'Port has not been detected yet. Start the application first.'
+      )
+    }
     await shell.openExternal(url)
   }
 
@@ -597,6 +735,7 @@ export class ApplicationManager {
       status: runtime?.status ?? 'stopped',
       health: runtime?.health ?? 'unknown',
       pid: runtime?.pid ?? null,
+      detectedPort: runtime?.detectedPort ?? null,
       startedAt: runtime?.startedAt ?? null,
       lastError: runtime?.lastError ?? null,
       localUrl: this.getLocalUrl(record)

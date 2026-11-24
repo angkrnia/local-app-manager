@@ -35,6 +35,8 @@ export const portSchema = z
   .min(1, 'Port must be between 1 and 65535')
   .max(65_535, 'Port must be between 1 and 65535')
 
+export const optionalPortSchema = portSchema.nullable().default(null)
+
 export const idSchema = z.string().uuid('Invalid identifier')
 
 const environmentVariablesSchema = z
@@ -92,7 +94,7 @@ export const applicationInputSchema = z
     startCommand: commandSchema,
     stopCommand: optionalCommandSchema,
     localHost: hostSchema.default('127.0.0.1'),
-    localPort: portSchema,
+    localPort: optionalPortSchema,
     environmentVariables: environmentVariablesSchema.default({}),
     autoStart: z.boolean().default(false)
   })
@@ -142,6 +144,14 @@ export const namedTunnelInputSchema = z
 export const namedTunnelCreateRemoteSchema = z.object({ name: tunnelNameSchema }).strict()
 
 export const routeDnsSchema = z.object({ tunnelName: tunnelNameSchema, hostname: hostnameSchema }).strict()
+
+export const tunnelRemoveOptionsSchema = z
+  .object({
+    deleteRemote: z.boolean().optional().default(false)
+  })
+  .strict()
+  .optional()
+  .default({ deleteRemote: false })
 
 export const portCheckSchema = z.object({ host: hostSchema, port: portSchema }).strict()
 

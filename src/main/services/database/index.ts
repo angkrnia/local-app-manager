@@ -157,6 +157,62 @@ export class Database {
         throw error
       }
     }
+    if (version < 4) {
+      this.raw.exec('PRAGMA foreign_keys = OFF')
+      try {
+        this.raw.exec('BEGIN')
+        try {
+          this.raw.exec(`
+            CREATE TABLE applications_new (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              project_name TEXT NOT NULL DEFAULT '',
+              description TEXT NOT NULL DEFAULT '',
+              project_directory TEXT NOT NULL,
+              working_directory TEXT NOT NULL,
+              application_type TEXT NOT NULL,
+              start_command TEXT NOT NULL,
+              stop_command TEXT,
+              local_host TEXT NOT NULL DEFAULT '127.0.0.1',
+              local_port INTEGER CHECK (local_port IS NULL OR local_port BETWEEN 1 AND 65535),
+              environment_variables TEXT NOT NULL DEFAULT '{}',
+              auto_start INTEGER NOT NULL DEFAULT 0,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            INSERT INTO applications_new (
+              id, name, project_name, description, project_directory, working_directory,
+              application_type, start_command, stop_command, local_host, local_port,
+              environment_variables, auto_start, sort_order, created_at, updated_at
+            )
+            SELECT
+              id, name, project_name, description, project_directory, working_directory,
+              application_type, start_command, stop_command, local_host, local_port,
+              environment_variables, auto_start, sort_order, created_at, updated_at
+            FROM applications;
+
+            DROP TABLE applications;
+            ALTER TABLE applications_new RENAME TO applications;
+
+            CREATE INDEX IF NOT EXISTS idx_applications_name ON applications (name);
+            CREATE INDEX IF NOT EXISTS idx_applications_port ON applications (local_port);
+            CREATE INDEX IF NOT EXISTS idx_applications_updated ON applications (updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_applications_sort_order ON applications (sort_order ASC);
+            CREATE INDEX IF NOT EXISTS idx_applications_project_name ON applications (project_name);
+
+            PRAGMA user_version = 4;
+          `)
+          this.raw.exec('COMMIT')
+        } catch (error) {
+          this.raw.exec('ROLLBACK')
+          throw error
+        }
+      } finally {
+        this.raw.exec('PRAGMA foreign_keys = ON')
+      }
+    }
   }
 
   prepare(sql: string): ReturnType<DatabaseSync['prepare']> {

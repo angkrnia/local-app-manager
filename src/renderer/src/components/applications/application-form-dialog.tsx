@@ -70,7 +70,7 @@ function emptyForm(defaultDirectory: string): FormState {
     startCommand: 'npm run dev',
     stopCommand: '',
     localHost: '127.0.0.1',
-    localPort: '3000',
+    localPort: '',
     autoStart: false,
     env: []
   }
@@ -87,7 +87,7 @@ function fromApplication(application: Application): FormState {
     startCommand: application.startCommand,
     stopCommand: application.stopCommand ?? '',
     localHost: application.localHost,
-    localPort: String(application.localPort),
+    localPort: application.localPort === null ? '' : String(application.localPort),
     autoStart: application.autoStart,
     env: toRows(application.environmentVariables)
   }
@@ -139,8 +139,7 @@ export function ApplicationFormDialog({
     setForm((current) => ({
       ...current,
       applicationType: value,
-      startCommand: commandTouched.current ? current.startCommand : option.defaultCommand,
-      localPort: commandTouched.current ? current.localPort : String(option.defaultPort)
+      startCommand: commandTouched.current ? current.startCommand : option.defaultCommand
     }))
     setPortCheck(null)
   }
@@ -181,13 +180,18 @@ export function ApplicationFormDialog({
     event.preventDefault()
     setError(null)
 
-    const port = Number(form.localPort)
+    const trimmedPort = form.localPort.trim()
+    let port: number | null = null
+    if (trimmedPort !== '') {
+      const parsedPort = Number(trimmedPort)
+      if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65_535) {
+        return setError('Port must be a whole number between 1 and 65535, or left empty for auto-detect.')
+      }
+      port = parsedPort
+    }
     if (!form.name.trim()) return setError('Application name is required.')
     if (!form.projectDirectory.trim()) return setError('Project directory is required.')
     if (!form.startCommand.trim()) return setError('Start command is required.')
-    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-      return setError('Port must be a whole number between 1 and 65535.')
-    }
     if (duplicateKeys.length > 0) {
       return setError(`Duplicate environment variable: ${duplicateKeys[0]}`)
     }
@@ -260,7 +264,7 @@ export function ApplicationFormDialog({
                 list="tm-existing-projects"
                 value={form.projectName}
                 onChange={(event) => update('projectName', event.target.value)}
-                placeholder="e.g. Ladang, Nexa, WHMCS"
+                placeholder="e.g. Storefront, Admin API, Docs"
                 maxLength={80}
               />
               {existingProjects.length > 0 && (
@@ -409,17 +413,26 @@ export function ApplicationFormDialog({
                     update('localPort', event.target.value.replace(/[^\d]/g, ''))
                     setPortCheck(null)
                   }}
-                  placeholder="3000"
+                  placeholder="Auto"
                   inputMode="numeric"
                   className="font-mono text-xs"
                   aria-label="Local port"
                 />
               </div>
-              <Button type="button" variant="outline" size="sm" disabled={checkingPort} onClick={() => void checkPort()}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={checkingPort || !form.localPort.trim()}
+                onClick={() => void checkPort()}
+              >
                 {checkingPort ? <Loader2 className="animate-spin" /> : null}
                 Check port
               </Button>
             </div>
+            <p className="text-[11px] text-muted-foreground">
+              Leave port empty to auto-detect when the application starts.
+            </p>
             {portCheck && (
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p
@@ -487,7 +500,7 @@ export function ApplicationFormDialog({
             </div>
             {form.env.length === 0 ? (
               <p className="rounded-lg border border-dashed border-border px-3 py-3 text-center text-[11px] text-muted-foreground">
-                No environment variables. PORT is injected automatically when it is not set.
+                No environment variables. PORT is injected automatically when a local port is set.
               </p>
             ) : (
               <div className="space-y-2">

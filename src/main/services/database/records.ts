@@ -18,7 +18,7 @@ export interface ApplicationRecord {
   startCommand: string
   stopCommand: string | null
   localHost: string
-  localPort: number
+  localPort: number | null
   environmentVariables: Record<string, string>
   autoStart: boolean
   createdAt: string

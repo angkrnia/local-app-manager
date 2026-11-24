@@ -6,7 +6,8 @@ import {
   namedTunnelCreateRemoteSchema,
   namedTunnelInputSchema,
   quickTunnelInputSchema,
-  routeDnsSchema
+  routeDnsSchema,
+  tunnelRemoveOptionsSchema
 } from '@shared/validation'
 import { handle, type IpcContext } from './helpers'
 
@@ -33,8 +34,8 @@ export function registerTunnelHandlers(context: IpcContext): void {
 
   handle(IPC.tunnels.restart, (id: unknown) => tunnels.restart(idSchema.parse(id)))
 
-  handle(IPC.tunnels.remove, async (id: unknown) => {
-    await tunnels.remove(idSchema.parse(id))
+  handle(IPC.tunnels.remove, async (id: unknown, options: unknown) => {
+    await tunnels.remove(idSchema.parse(id), tunnelRemoveOptionsSchema.parse(options))
     return null
   })
 

@@ -481,6 +481,58 @@ export class CloudflaredManager implements CloudflaredProvider {
     }
   }
 
+  async deleteTunnel(nameOrId: string): Promise<void> {
+    const binary = await this.getBinary()
+    this.assertAuthenticated()
+
+    const cleanup = await runCommand(
+      binary.executable,
+      [...binary.args, 'tunnel', 'cleanup', nameOrId],
+      { timeoutMs: 30_000 }
+    )
+    const cleanupOutput = `${cleanup.stdout}\n${cleanup.stderr}`
+    if (cleanup.code !== 0 && /cert\.pem|login|not authenticated|unauthorized/i.test(cleanupOutput)) {
+      throw new AppError(
+        ErrorCode.CLOUDFLARE_NOT_AUTHENTICATED,
+        'Cloudflare authentication is missing or expired. Sign in to Cloudflare again.'
+      )
+    }
+
+    const result = await runCommand(
+      binary.executable,
+      [...binary.args, 'tunnel', 'delete', '-f', nameOrId],
+      { timeoutMs: 45_000 }
+    )
+    const combined = `${result.stdout}\n${result.stderr}`
+    if (result.code !== 0) {
+      if (/not found|no such tunnel|does not exist|could not find/i.test(combined)) {
+        this.deps.logs.log({
+          source: 'system',
+          level: 'info',
+          message: `Remote Cloudflare tunnel "${nameOrId}" was already removed or not found`
+        })
+        return
+      }
+      if (/cert\.pem|login|not authenticated|unauthorized/i.test(combined)) {
+        throw new AppError(
+          ErrorCode.CLOUDFLARE_NOT_AUTHENTICATED,
+          'Cloudflare authentication is missing or expired. Sign in to Cloudflare again.'
+        )
+      }
+      throw new AppError(
+        ErrorCode.CLOUDFLARE_COMMAND_FAILED,
+        `Could not delete remote Cloudflare tunnel "${nameOrId}".`,
+        combined.trim().slice(0, 2_000)
+      )
+    }
+
+    this.deps.logs.log({
+      source: 'system',
+      level: 'info',
+      message: `Deleted remote Cloudflare tunnel "${nameOrId}"`
+    })
+  }
+
   async login(): Promise<NamedAuthStatus> {
     if (this.getAuthStatus().authenticated) return this.getAuthStatus()
     const binary = await this.getBinary()

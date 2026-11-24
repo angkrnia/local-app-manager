@@ -32,6 +32,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
+import { ApplicationPicker } from './application-picker'
 
 export function NamedTunnelDialog({
   open,
@@ -73,7 +74,9 @@ export function NamedTunnelDialog({
   useEffect(() => {
     if (!open) return
     setError(null)
-    setApplicationId(applications[0]?.id ?? '')
+    setApplicationId(
+      applications.find((item) => item.status === 'running')?.id ?? applications[0]?.id ?? ''
+    )
     setHostname('')
     setTunnelName('')
     setNewTunnelName('')
@@ -140,6 +143,10 @@ export function NamedTunnelDialog({
   const selectedRemote = useMemo(
     () => remotes.find((remote) => remote.name === tunnelName) ?? null,
     [remotes, tunnelName]
+  )
+  const selectedApplication = useMemo(
+    () => applications.find((item) => item.id === applicationId) ?? null,
+    [applications, applicationId]
   )
 
   const submit = async (): Promise<void> => {
@@ -313,19 +320,18 @@ export function NamedTunnelDialog({
 
               <div className="space-y-1.5">
                 <Label>Application</Label>
-                <Select value={applicationId} onValueChange={setApplicationId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select an application" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {applications.map((application) => (
-                      <SelectItem key={application.id} value={application.id}>
-                        {application.name}
-                        {application.status === 'running' ? '' : ' (stopped)'}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <ApplicationPicker
+                  applications={applications}
+                  value={applicationId}
+                  onChange={setApplicationId}
+                  disabled={busy}
+                />
+                {selectedApplication && selectedApplication.status !== 'running' && (
+                  <p className="text-[11px] text-warning">
+                    {selectedApplication.name} is not running. Start it first, or use Start &amp; Expose from the
+                    Applications page.
+                  </p>
+                )}
               </div>
 
               <div className="space-y-1.5">

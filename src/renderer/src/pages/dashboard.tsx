@@ -210,7 +210,10 @@ export default function DashboardPage(): React.JSX.Element {
                         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
                           <span>{applicationTypeLabel(application.applicationType)}</span>
                           <span aria-hidden>·</span>
-                          <span className="font-mono">{application.localUrl}</span>
+                          <span className="font-mono">
+                            {application.localUrl ??
+                              (application.status === 'starting' ? 'Detecting port…' : 'Auto port')}
+                          </span>
                           {application.pid !== null && (
                             <>
                               <span aria-hidden>·</span>

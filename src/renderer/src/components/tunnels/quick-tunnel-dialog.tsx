@@ -15,14 +15,8 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { ApplicationPicker } from './application-picker'
 
 export function QuickTunnelDialog({
   open,
@@ -44,7 +38,12 @@ export function QuickTunnelDialog({
 
   useEffect(() => {
     if (!open) return
-    setApplicationId(defaultApplicationId ?? applications[0]?.id ?? '')
+    setApplicationId(
+      defaultApplicationId ??
+        applications.find((item) => item.status === 'running')?.id ??
+        applications[0]?.id ??
+        ''
+    )
     setName('')
     setStartNow(true)
     setError(null)
@@ -89,7 +88,7 @@ export function QuickTunnelDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => (!busy ? onOpenChange(next) : undefined)}>
-      <DialogContent>
+      <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Rocket className="size-4 text-primary" />
@@ -104,25 +103,12 @@ export function QuickTunnelDialog({
         <div className="space-y-4">
           <div className="space-y-1.5">
             <Label>Application</Label>
-            {applications.length === 0 ? (
-              <p className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
-                Add an application first, then create a tunnel for it.
-              </p>
-            ) : (
-              <Select value={applicationId} onValueChange={setApplicationId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select an application" />
-                </SelectTrigger>
-                <SelectContent>
-                  {applications.map((application) => (
-                    <SelectItem key={application.id} value={application.id}>
-                      {application.name}
-                      {application.status === 'running' ? '' : ' (stopped)'}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
+            <ApplicationPicker
+              applications={applications}
+              value={applicationId}
+              onChange={setApplicationId}
+              disabled={busy}
+            />
             {selected && selected.status !== 'running' && (
               <p className="text-[11px] text-warning">
                 {selected.name} is not running. Start it first, or use Start &amp; Expose from the Applications

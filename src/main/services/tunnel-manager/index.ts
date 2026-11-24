@@ -4,6 +4,7 @@ import type {
   NamedTunnelInput,
   QuickTunnelInput,
   Tunnel,
+  TunnelRemoveOptions,
   TunnelStatus
 } from '@shared/types'
 import {
@@ -32,7 +33,8 @@ import {
 
 export interface ApplicationLookup {
   getRecord(id: string): ApplicationRecord
-  getLocalUrl(record: ApplicationRecord): string
+  getEffectivePort(id: string): number | null
+  getLocalUrl(record: ApplicationRecord): string | null
   get(id: string): unknown
 }
 
@@ -126,7 +128,7 @@ export class TunnelManager {
       throw new AppError(ErrorCode.VALIDATION, formatZodError(parsed.error))
     }
     const application = this.deps.applications.getRecord(parsed.data.applicationId)
-    const localUrl = this.deps.applications.getLocalUrl(application)
+    const localUrl = this.deps.applications.getLocalUrl(application) ?? ''
     const record = this.deps.repository.create({
       applicationId: application.id,
       tunnelType: 'quick',
@@ -165,7 +167,7 @@ export class TunnelManager {
         `Named tunnel "${parsed.data.tunnelName}" was not found in your Cloudflare account. Create it first, then refresh the list.`
       )
     }
-    const localUrl = this.deps.applications.getLocalUrl(application)
+    const localUrl = this.deps.applications.getLocalUrl(application) ?? ''
     const record = this.deps.repository.create({
       applicationId: application.id,
       tunnelType: 'named',
@@ -229,16 +231,29 @@ export class TunnelManager {
     let localUrl = record.localUrl
     if (record.applicationId) {
       const application = this.deps.applications.getRecord(record.applicationId)
-      localUrl = this.deps.applications.getLocalUrl(application)
+      const port = this.deps.applications.getEffectivePort(record.applicationId)
+      const resolvedUrl = this.deps.applications.getLocalUrl(application)
+      if (port === null || !resolvedUrl) {
+        const message =
+          `The local application "${application.name}" uses auto-detect port and is not running yet. ` +
+          'Start the application first.'
+        runtime.status = 'error'
+        runtime.lastError = message
+        this.persist(id, { status: 'error', lastError: message })
+        this.log(id, 'error', message)
+        this.broadcast()
+        throw new AppError(ErrorCode.TUNNEL_START_FAILED, message)
+      }
+      localUrl = resolvedUrl
       const reachable = await isPortInUse(
         effectiveHost(application.localHost),
-        application.localPort,
+        port,
         1_500
       )
       if (!reachable) {
         const message =
           `The local application "${application.name}" is not listening on ` +
-          `${effectiveHost(application.localHost)}:${application.localPort}. Start the application first.`
+          `${effectiveHost(application.localHost)}:${port}. Start the application first.`
         runtime.status = 'error'
         runtime.lastError = message
         this.persist(id, { status: 'error', lastError: message })
@@ -463,12 +478,26 @@ export class TunnelManager {
     return this.start(id)
   }
 
-  async remove(id: string): Promise<void> {
+  async remove(id: string, options: TunnelRemoveOptions = {}): Promise<void> {
     const record = this.requireRecord(id)
     await this.stop(id).catch(() => undefined)
+    const shouldDeleteRemote = Boolean(options.deleteRemote && record.tunnelType === 'named')
+    if (shouldDeleteRemote) {
+      const remoteRef = record.tunnelName ?? record.cloudflareTunnelId
+      if (remoteRef) {
+        await this.deps.cloudflared.deleteTunnel(remoteRef)
+      }
+    }
     this.deps.repository.delete(id)
     this.runtimes.delete(id)
-    this.recordActivity('info', 'Tunnel deleted', null, record.applicationId)
+    this.recordActivity(
+      'info',
+      shouldDeleteRemote
+        ? `Tunnel "${record.tunnelName ?? record.id}" deleted locally and from Cloudflare`
+        : 'Tunnel deleted',
+      null,
+      record.applicationId
+    )
     this.broadcast()
   }
 

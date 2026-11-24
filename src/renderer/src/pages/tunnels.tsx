@@ -20,7 +20,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import type { BatchResult, NamedAuthStatus, Tunnel, TunnelType } from '@shared/types'
-import { run } from '@/lib/run'
+import { run, runAction } from '@/lib/run'
 import { cn, formatRelative, formatUptime } from '@/lib/utils'
 import { useAppStore } from '@/stores/app-store'
 import { useTicker } from '@/hooks/use-ticker'
@@ -91,6 +91,7 @@ export default function TunnelsPage(): React.JSX.Element {
   const [namedOpen, setNamedOpen] = useState(false)
   const [logsFor, setLogsFor] = useState<Tunnel | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Tunnel | null>(null)
+  const [deleteRemote, setDeleteRemote] = useState(false)
   const [stopAllOpen, setStopAllOpen] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [batching, setBatching] = useState(false)
@@ -498,7 +499,9 @@ export default function TunnelsPage(): React.JSX.Element {
                       )}
                     </TableCell>
                     <TableCell>
-                      <span className="font-mono text-[11px] text-muted-foreground">{tunnel.localUrl}</span>
+                      <span className="font-mono text-[11px] text-muted-foreground">
+                        {tunnel.localUrl || 'Auto-detect'}
+                      </span>
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-1">
@@ -576,7 +579,7 @@ export default function TunnelsPage(): React.JSX.Element {
                               onSelect={() => {
                                 if (tunnel.applicationId) {
                                   const app = applications.find((item) => item.id === tunnel.applicationId)
-                                  if (app) toast.info(`${app.name} · ${app.localUrl}`)
+                                  if (app) toast.info(`${app.name} · ${app.localUrl ?? 'Auto-detect port'}`)
                                 }
                               }}
                               disabled={!tunnel.applicationId}
@@ -587,7 +590,10 @@ export default function TunnelsPage(): React.JSX.Element {
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               className="text-destructive focus:text-destructive"
-                              onSelect={() => setDeleteTarget(tunnel)}
+                              onSelect={() => {
+                                setDeleteRemote(false)
+                                setDeleteTarget(tunnel)
+                              }}
                             >
                               <Trash2 />
                               Delete tunnel
@@ -622,20 +628,94 @@ export default function TunnelsPage(): React.JSX.Element {
 
       <ConfirmDialog
         open={deleteTarget !== null}
-        onOpenChange={(open) => (!open ? setDeleteTarget(null) : undefined)}
-        title={`Delete "${deleteTarget ? tunnelLabel(deleteTarget) : ''}"?`}
-        description="The tunnel is stopped and removed from Local App Manager. The Cloudflare named tunnel itself is not deleted from your account."
-        confirmLabel="Delete tunnel"
-        onConfirm={async () => {
-          if (!deleteTarget) return
-          await run(() => window.api.tunnels.remove(deleteTarget.id), {
-            loading: 'Deleting tunnel…',
-            success: 'Tunnel deleted',
-            error: 'Could not delete tunnel'
-          })
-          setDeleteTarget(null)
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeleteTarget(null)
+            setDeleteRemote(false)
+          }
         }}
-      />
+        title={`Delete "${deleteTarget ? tunnelLabel(deleteTarget) : ''}"?`}
+        description="The tunnel is stopped and removed from Local App Manager."
+        confirmLabel={
+          deleteTarget?.tunnelType === 'named' && deleteRemote
+            ? 'Delete locally & on Cloudflare'
+            : 'Delete tunnel'
+        }
+        onConfirm={async () => {
+          if (!deleteTarget) return false
+          const shouldDeleteRemote = deleteTarget.tunnelType === 'named' && deleteRemote
+          const ok = await runAction(
+            () => window.api.tunnels.remove(deleteTarget.id, { deleteRemote: shouldDeleteRemote }),
+            {
+              loading: shouldDeleteRemote
+                ? 'Deleting tunnel locally and on Cloudflare…'
+                : 'Deleting tunnel…',
+              success: shouldDeleteRemote
+                ? 'Tunnel deleted locally and on Cloudflare'
+                : 'Tunnel deleted',
+              error: 'Could not delete tunnel'
+            }
+          )
+          if (ok) {
+            setDeleteTarget(null)
+            setDeleteRemote(false)
+          }
+          return ok
+        }}
+      >
+        {deleteTarget?.tunnelType === 'named' && (
+          <div className="space-y-3">
+            <label
+              htmlFor="delete-remote-tunnel"
+              className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-border bg-muted/30 p-3"
+            >
+              <Checkbox
+                id="delete-remote-tunnel"
+                checked={deleteRemote}
+                onCheckedChange={(checked) => setDeleteRemote(checked === true)}
+                className="mt-0.5"
+              />
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium leading-snug">
+                  Also delete remote tunnel &ldquo;{deleteTarget.tunnelName ?? deleteTarget.id}&rdquo; from Cloudflare
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Runs <code className="font-mono">cloudflared tunnel cleanup</code> and{' '}
+                  <code className="font-mono">tunnel delete -f</code> on your Cloudflare account.
+                </p>
+              </div>
+            </label>
+
+            <div className="space-y-2 rounded-lg border border-border/80 bg-muted/20 p-3 text-xs text-muted-foreground">
+              <p>
+                <code className="font-mono">cloudflared</code> CLI cannot remove DNS records automatically.
+                {deleteTarget.hostname ? (
+                  <>
+                    {' '}
+                    If <code className="font-mono">{deleteTarget.hostname}</code> is no longer needed, delete its
+                    CNAME record in Cloudflare DNS.
+                  </>
+                ) : (
+                  ' Delete any unused CNAME records in Cloudflare DNS if no longer needed.'
+                )}
+              </p>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={() =>
+                  void runAction(() => window.api.system.openExternal('https://dash.cloudflare.com/'), {
+                    error: 'Could not open Cloudflare Dashboard'
+                  })
+                }
+              >
+                <ExternalLink className="size-3" />
+                Open Cloudflare Dashboard
+              </Button>
+            </div>
+          </div>
+        )}
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={stopAllOpen}

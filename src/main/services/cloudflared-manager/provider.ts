@@ -19,4 +19,5 @@ export interface CloudflaredProvider {
   listTunnels(): Promise<NamedTunnelRemote[]>
   createTunnel(name: string): Promise<NamedTunnelRemote>
   routeDns(name: string, hostname: string): Promise<void>
+  deleteTunnel(nameOrId: string): Promise<void>
 }

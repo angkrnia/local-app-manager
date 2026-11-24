@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import net from 'node:net'
 
 vi.mock('electron', () => ({
@@ -27,7 +31,7 @@ describe('Database persistence, Application CRUD, Health Check & Lifecycle', () 
   it('supports full Application CRUD, secret masking, duplication, and SQLite persistence', () => {
     const created = harness.applications.create({
       name: 'Next.js Dashboard',
-      projectName: 'Nexa',
+      projectName: 'Frontend',
       description: 'Local frontend',
       projectDirectory: harness.rootDir,
       workingDirectory: harness.rootDir,
@@ -55,7 +59,7 @@ describe('Database persistence, Application CRUD, Health Check & Lifecycle', () 
     // Update preserves masked secret
     const updated = harness.applications.update(created.id, {
       name: 'Next.js Dashboard v2',
-      projectName: 'Ladang',
+      projectName: 'Backend',
       description: 'Updated description',
       projectDirectory: harness.rootDir,
       workingDirectory: harness.rootDir,
@@ -71,7 +75,7 @@ describe('Database persistence, Application CRUD, Health Check & Lifecycle', () 
       autoStart: true
     })
     expect(updated.name).toBe('Next.js Dashboard v2')
-    expect(updated.projectName).toBe('Ladang')
+    expect(updated.projectName).toBe('Backend')
     expect(updated.localPort).toBe(3457)
     expect(updated.autoStart).toBe(true)
 
@@ -176,5 +180,180 @@ describe('Database persistence, Application CRUD, Health Check & Lifecycle', () 
     } finally {
       await new Promise<void>((resolve) => blocker.close(() => resolve()))
     }
+  })
+
+  it('migrates v3 databases to v4 allowing nullable local_port without cascading tunnel deletes', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'tunnel-manager-v3-'))
+    const dbFile = join(tempDir, 'legacy.db')
+    const raw = new DatabaseSync(dbFile)
+    try {
+      raw.exec(`
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE applications (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          project_name TEXT NOT NULL DEFAULT '',
+          description TEXT NOT NULL DEFAULT '',
+          project_directory TEXT NOT NULL,
+          working_directory TEXT NOT NULL,
+          application_type TEXT NOT NULL,
+          start_command TEXT NOT NULL,
+          stop_command TEXT,
+          local_host TEXT NOT NULL DEFAULT '127.0.0.1',
+          local_port INTEGER NOT NULL CHECK (local_port BETWEEN 1 AND 65535),
+          environment_variables TEXT NOT NULL DEFAULT '{}',
+          auto_start INTEGER NOT NULL DEFAULT 0,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE tunnels (
+          id TEXT PRIMARY KEY,
+          application_id TEXT REFERENCES applications (id) ON DELETE CASCADE,
+          tunnel_type TEXT NOT NULL CHECK (tunnel_type IN ('quick', 'named')),
+          tunnel_name TEXT,
+          cloudflare_tunnel_id TEXT,
+          hostname TEXT,
+          local_url TEXT NOT NULL,
+          public_url TEXT,
+          status TEXT NOT NULL DEFAULT 'stopped',
+          cloudflared_pid INTEGER,
+          started_at TEXT,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO applications (
+          id, name, project_name, description, project_directory, working_directory,
+          application_type, start_command, stop_command, local_host, local_port,
+          environment_variables, auto_start, sort_order, created_at, updated_at
+        ) VALUES (
+          'app-1', 'Legacy App', '', '', 'C:\\app', 'C:\\app',
+          'node', 'npm run dev', NULL, '127.0.0.1', 3000,
+          '{}', 0, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+        );
+        INSERT INTO tunnels (
+          id, application_id, tunnel_type, local_url, status, created_at, updated_at
+        ) VALUES (
+          'tun-1', 'app-1', 'quick', 'http://127.0.0.1:3000', 'stopped', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+        );
+        PRAGMA user_version = 3;
+      `)
+    } finally {
+      raw.close()
+    }
+
+    const migrated = new Database(dbFile)
+    try {
+      const versionRow = migrated.prepare('PRAGMA user_version').get() as { user_version: number }
+      expect(versionRow.user_version).toBe(4)
+
+      const repo = new ApplicationsRepository(migrated)
+      const legacy = repo.get('app-1')
+      expect(legacy?.localPort).toBe(3000)
+
+      const tunnelRow = migrated.prepare('SELECT id FROM tunnels WHERE id = ?').get('tun-1') as
+        | { id: string }
+        | undefined
+      expect(tunnelRow?.id).toBe('tun-1')
+
+      const autoApp = repo.create({
+        name: 'Auto App',
+        projectName: '',
+        description: '',
+        projectDirectory: tempDir,
+        workingDirectory: tempDir,
+        applicationType: 'node',
+        startCommand: 'npm run dev',
+        stopCommand: null,
+        localHost: '127.0.0.1',
+        localPort: null,
+        environmentVariables: {},
+        autoStart: false
+      })
+      expect(autoApp.localPort).toBeNull()
+    } finally {
+      migrated.close()
+      try {
+        rmSync(tempDir, { recursive: true, force: true })
+      } catch {
+        // Ignore transient Windows file lock delays.
+      }
+    }
+  })
+
+  it('auto-detects port from runtime logs when localPort is null and clears it on stop', async () => {
+    const port = await findFreePort()
+    const app = harness.applications.create({
+      name: 'Auto Log Port Server',
+      description: '',
+      projectDirectory: harness.rootDir,
+      workingDirectory: harness.rootDir,
+      applicationType: 'node',
+      startCommand: `"${process.execPath}" "${harness.serverScript}" ${port}`,
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      localPort: null,
+      environmentVariables: {},
+      autoStart: false
+    })
+
+    expect(app.localPort).toBeNull()
+    expect(app.detectedPort).toBeNull()
+    expect(app.localUrl).toBeNull()
+
+    const started = await harness.applications.start(app.id)
+    expect(started.status).toBe('running')
+    expect(started.health).toBe('healthy')
+    expect(started.detectedPort).toBe(port)
+    expect(started.localUrl).toBe(`http://127.0.0.1:${port}`)
+
+    const stopped = await harness.applications.stop(app.id)
+    expect(stopped.status).toBe('stopped')
+    expect(stopped.detectedPort).toBeNull()
+    expect(stopped.localUrl).toBeNull()
+    expect(getActiveProcessCount()).toBe(0)
+  })
+
+  it('auto-detects port via process-tree inspection for silent servers with no log output', async () => {
+    const port = await findFreePort()
+    const silentScript = join(harness.rootDir, 'silent-server.cjs')
+    writeFileSync(
+      silentScript,
+      `
+const http = require('node:http');
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('ok');
+});
+server.listen(${port}, '127.0.0.1');
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+process.on('SIGINT', () => server.close(() => process.exit(0)));
+`,
+      'utf8'
+    )
+
+    const app = harness.applications.create({
+      name: 'Silent Auto Port Server',
+      description: '',
+      projectDirectory: harness.rootDir,
+      workingDirectory: harness.rootDir,
+      applicationType: 'node',
+      startCommand: `"${process.execPath}" "${silentScript}"`,
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      localPort: null,
+      environmentVariables: {},
+      autoStart: false
+    })
+
+    const started = await harness.applications.start(app.id)
+    expect(started.status).toBe('running')
+    expect(started.health).toBe('healthy')
+    expect(started.detectedPort).toBe(port)
+    expect(started.localUrl).toBe(`http://127.0.0.1:${port}`)
+
+    await harness.applications.stop(app.id)
+    expect(getActiveProcessCount()).toBe(0)
   })
 })
