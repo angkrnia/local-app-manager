@@ -245,7 +245,7 @@ export const batchIdsSchema = z
 export function formatZodError(error: z.ZodError): string {
   return error.issues
     .map((issue) => {
-      const field = issue.path.join('.')
+      const field = issue.path.map(String).join('.')
       return field ? `${field}: ${issue.message}` : issue.message
     })
     .join('; ')
