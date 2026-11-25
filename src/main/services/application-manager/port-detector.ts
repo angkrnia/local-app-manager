@@ -1,7 +1,7 @@
 import type { LocalProtocol } from '@shared/types'
 import { stripAnsi } from '../../utils/ansi'
 import { sleep } from '../../utils/net'
-import { findListeningPortsForProcessTree } from '../../utils/port-info'
+import { findListeningPortsForProcessTree, isAuxiliaryPort } from '../../utils/port-info'
 import { checkHttpHealth } from '../health-check'
 
 const LOCAL_URL_PORT_PATTERN =
@@ -91,6 +91,7 @@ export interface WaitForAutoDetectedPortOptions {
 export interface WaitForAutoDetectedPortResult {
   healthy: boolean
   port: number | null
+  host: string | null
   lastError: string | null
 }
 
@@ -108,7 +109,7 @@ export async function waitForAutoDetectedPort(
 
   while (Date.now() < deadline) {
     if (options.shouldAbort?.()) {
-      return { healthy: false, port: null, lastError }
+      return { healthy: false, port: null, host: null, lastError }
     }
 
     const logCandidates = options.logDetector
@@ -117,7 +118,7 @@ export async function waitForAutoDetectedPort(
 
     for (const port of logCandidates) {
       if (options.shouldAbort?.()) {
-        return { healthy: false, port: null, lastError }
+        return { healthy: false, port: null, host: null, lastError }
       }
       const probe = await checkHttpHealth({
         host: options.host,
@@ -126,7 +127,7 @@ export async function waitForAutoDetectedPort(
         timeoutMs: probeTimeoutMs
       })
       if (probe.healthy) {
-        return { healthy: true, port, lastError: null }
+        return { healthy: true, port, host: probe.resolvedHost ?? options.host, lastError: null }
       }
       lastError = probe.error
     }
@@ -134,28 +135,34 @@ export async function waitForAutoDetectedPort(
     const pid = options.getPid()
     if (pid !== null && !options.shouldAbort?.()) {
       const treePorts = await findListeningPortsForProcessTree(pid)
-      for (const port of treePorts) {
-        if (options.shouldAbort?.()) {
-          return { healthy: false, port: null, lastError }
+      const treePortSet = new Set(treePorts)
+      const hasBoundLogCandidate = logCandidates.some((port) => treePortSet.has(port))
+
+      if (!hasBoundLogCandidate) {
+        for (const port of treePorts) {
+          if (isAuxiliaryPort(port)) continue
+          if (options.shouldAbort?.()) {
+            return { healthy: false, port: null, host: null, lastError }
+          }
+          const probe = await checkHttpHealth({
+            host: options.host,
+            port,
+            protocol: options.protocol,
+            timeoutMs: probeTimeoutMs
+          })
+          if (probe.healthy) {
+            return { healthy: true, port, host: probe.resolvedHost ?? options.host, lastError: null }
+          }
+          lastError = probe.error
         }
-        const probe = await checkHttpHealth({
-          host: options.host,
-          port,
-          protocol: options.protocol,
-          timeoutMs: probeTimeoutMs
-        })
-        if (probe.healthy) {
-          return { healthy: true, port, lastError: null }
-        }
-        lastError = probe.error
       }
     }
 
     if (options.shouldAbort?.()) {
-      return { healthy: false, port: null, lastError }
+      return { healthy: false, port: null, host: null, lastError }
     }
     await sleep(options.intervalMs)
   }
 
-  return { healthy: false, port: null, lastError }
+  return { healthy: false, port: null, host: null, lastError }
 }

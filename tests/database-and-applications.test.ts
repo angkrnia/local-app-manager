@@ -356,4 +356,107 @@ process.on('SIGINT', () => server.close(() => process.exit(0)));
     await harness.applications.stop(app.id)
     expect(getActiveProcessCount()).toBe(0)
   })
+
+  it('connects to an IPv6-only (::1) server even when localHost is 127.0.0.1', async () => {
+    const port = await findFreePort()
+    const ipv6Script = join(harness.rootDir, 'ipv6-server.cjs')
+    writeFileSync(
+      ipv6Script,
+      `
+const http = require('node:http');
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('ipv6-ok');
+});
+server.listen(${port}, '::1', () => {
+  console.log('Local: http://localhost:${port}/');
+});
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+process.on('SIGINT', () => server.close(() => process.exit(0)));
+`,
+      'utf8'
+    )
+
+    const app = harness.applications.create({
+      name: 'IPv6 Fixed Port Server',
+      description: '',
+      projectDirectory: harness.rootDir,
+      workingDirectory: harness.rootDir,
+      applicationType: 'nuxt',
+      startCommand: `"${process.execPath}" "${ipv6Script}"`,
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      localPort: port,
+      environmentVariables: {},
+      autoStart: false
+    })
+
+    const started = await harness.applications.start(app.id)
+    expect(started.status).toBe('running')
+    expect(started.health).toBe('healthy')
+    expect(started.localUrl).toBe(`http://[::1]:${port}`)
+
+    await harness.applications.stop(app.id)
+    expect(getActiveProcessCount()).toBe(0)
+  })
+
+  it('ignores 426 HMR ports and auto-detects a delayed IPv6 Nuxt-like app port', async () => {
+    const hmrPort = await findFreePort()
+    const appPort = await findFreePort()
+    const nuxtLikeScript = join(harness.rootDir, 'nuxt-like-server.cjs')
+    writeFileSync(
+      nuxtLikeScript,
+      `
+const http = require('node:http');
+const hmrServer = http.createServer((req, res) => {
+  res.writeHead(426, { 'Content-Type': 'text/plain', Upgrade: 'websocket' });
+  res.end('Upgrade Required');
+});
+hmrServer.listen(${hmrPort}, '127.0.0.1');
+
+console.log('  ➜ Local:    http://localhost:${appPort}/');
+
+let appServer = null;
+setTimeout(() => {
+  appServer = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<html>ok</html>');
+  });
+  appServer.listen(${appPort}, '::1');
+}, 300);
+
+const shutdown = () => {
+  hmrServer.close();
+  if (appServer) appServer.close(() => process.exit(0));
+  else process.exit(0);
+};
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+`,
+      'utf8'
+    )
+
+    const app = harness.applications.create({
+      name: 'Nuxt-like Auto Server',
+      description: '',
+      projectDirectory: harness.rootDir,
+      workingDirectory: harness.rootDir,
+      applicationType: 'nuxt',
+      startCommand: `"${process.execPath}" "${nuxtLikeScript}"`,
+      stopCommand: null,
+      localHost: '127.0.0.1',
+      localPort: null,
+      environmentVariables: {},
+      autoStart: false
+    })
+
+    const started = await harness.applications.start(app.id)
+    expect(started.status).toBe('running')
+    expect(started.health).toBe('healthy')
+    expect(started.detectedPort).toBe(appPort)
+    expect(started.localUrl).toBe(`http://[::1]:${appPort}`)
+
+    await harness.applications.stop(app.id)
+    expect(getActiveProcessCount()).toBe(0)
+  })
 })

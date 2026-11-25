@@ -26,11 +26,12 @@ import { ManagedProcess, type ProcessExitInfo } from '../process-manager'
 import { killProcessTree, spawnShellCommand } from '../process-manager/tree-kill'
 import { checkHttpHealth, waitForHealth } from '../health-check'
 import { detectLogLevel } from '../log-manager'
-import { isPortInUse } from '../../utils/net'
+import { formatHostForUrl, isPortInUse } from '../../utils/net'
 import {
   findListeningPortsForProcessTree,
   findPortOwner,
-  getListeningPortNumbers
+  getListeningPortNumbers,
+  isAuxiliaryPort
 } from '../../utils/port-info'
 import { isDirectory } from '../../utils/paths'
 import { LogPortDetector, waitForAutoDetectedPort } from './port-detector'
@@ -41,6 +42,7 @@ interface RuntimeState {
   health: HealthStatus
   pid: number | null
   detectedPort: number | null
+  detectedHost: string | null
   startedAt: string | null
   lastError: string | null
   sessionId: string | null
@@ -65,6 +67,7 @@ function createRuntime(): RuntimeState {
     health: 'unknown',
     pid: null,
     detectedPort: null,
+    detectedHost: null,
     startedAt: null,
     lastError: null,
     sessionId: null,
@@ -112,10 +115,12 @@ export class ApplicationManager {
   }
 
   getLocalUrl(record: ApplicationRecord): string | null {
-    const port = record.localPort ?? this.runtimes.get(record.id)?.detectedPort ?? null
+    const runtime = this.runtimes.get(record.id)
+    const port = record.localPort ?? runtime?.detectedPort ?? null
     if (port === null) return null
     const protocol = this.deps.settings.get().defaultProtocol
-    return `${protocol}://${effectiveHost(record.localHost)}:${port}`
+    const host = runtime?.detectedHost ?? effectiveHost(record.localHost)
+    return `${protocol}://${formatHostForUrl(host)}:${port}`
   }
 
   async checkPort(host: string, port: number): Promise<PortCheckResult> {
@@ -265,6 +270,7 @@ export class ApplicationManager {
     runtime.status = 'starting'
     runtime.health = 'unknown'
     runtime.detectedPort = null
+    runtime.detectedHost = null
     runtime.lastError = null
     runtime.startedAt = null
     this.logApp(id, 'info', `Starting "${record.name}" with command: ${record.startCommand}`)
@@ -346,6 +352,8 @@ export class ApplicationManager {
         this.broadcast()
         throw new AppError(ErrorCode.HEALTH_CHECK_TIMEOUT, message)
       }
+
+      runtime.detectedHost = result.lastResult?.resolvedHost ?? host
     } else {
       const detected = await waitForAutoDetectedPort({
         host,
@@ -383,6 +391,7 @@ export class ApplicationManager {
       }
 
       runtime.detectedPort = detected.port
+      runtime.detectedHost = detected.host ?? host
       this.logApp(id, 'info', `Auto-detected port ${detected.port} for "${record.name}"`)
     }
 
@@ -444,6 +453,7 @@ export class ApplicationManager {
     runtime.startedAt = null
     runtime.pid = null
     runtime.detectedPort = null
+    runtime.detectedHost = null
     runtime.lastError = null
     this.logApp(id, 'info', `"${record.name}" stopped`)
     this.recordActivity('info', `Application "${record.name}" stopped`, id)
@@ -464,6 +474,7 @@ export class ApplicationManager {
     runtime.process = null
     runtime.pid = null
     runtime.detectedPort = null
+    runtime.detectedHost = null
     if (runtime.sessionId) {
       this.deps.sessions.finish(runtime.sessionId, {
         status: info.expected ? 'stopped' : info.code === 0 ? 'exited' : 'crashed',
@@ -562,6 +573,7 @@ export class ApplicationManager {
         if (runtime.pid !== null) {
           const candidates = await findListeningPortsForProcessTree(runtime.pid)
           for (const candidatePort of candidates) {
+            if (isAuxiliaryPort(candidatePort)) continue
             const probe = await checkHttpHealth({
               host: effectiveHost(record.localHost),
               port: candidatePort,
@@ -570,6 +582,7 @@ export class ApplicationManager {
             })
             if (probe.healthy) {
               runtime.detectedPort = candidatePort
+              runtime.detectedHost = probe.resolvedHost ?? effectiveHost(record.localHost)
               runtime.status = 'running'
               runtime.health = 'healthy'
               runtime.lastError = null
@@ -585,7 +598,7 @@ export class ApplicationManager {
       const results = await Promise.allSettled(
         targets.map((target) =>
           checkHttpHealth({
-            host: effectiveHost(target.record.localHost),
+            host: target.runtime.detectedHost ?? effectiveHost(target.record.localHost),
             port: target.port,
             protocol,
             timeoutMs: 2_000
@@ -604,8 +617,9 @@ export class ApplicationManager {
         if (!result.value.healthy && record.localPort === null && runtime.pid !== null && runtime.process?.running) {
           const treePorts = await findListeningPortsForProcessTree(runtime.pid)
           let reboundPort: number | null = null
+          let reboundHost: string | null = null
           for (const candidatePort of treePorts) {
-            if (candidatePort === port) continue
+            if (candidatePort === port || isAuxiliaryPort(candidatePort)) continue
             const probe = await checkHttpHealth({
               host: effectiveHost(record.localHost),
               port: candidatePort,
@@ -614,11 +628,13 @@ export class ApplicationManager {
             })
             if (probe.healthy) {
               reboundPort = candidatePort
+              reboundHost = probe.resolvedHost ?? effectiveHost(record.localHost)
               break
             }
           }
           if (reboundPort !== null) {
             runtime.detectedPort = reboundPort
+            runtime.detectedHost = reboundHost
             runtime.health = 'healthy'
             runtime.status = 'running'
             runtime.lastError = null
@@ -630,6 +646,11 @@ export class ApplicationManager {
             changed = true
             continue
           }
+        }
+
+        if (result.value.healthy && result.value.resolvedHost && result.value.resolvedHost !== runtime.detectedHost) {
+          runtime.detectedHost = result.value.resolvedHost
+          changed = true
         }
 
         if (nextHealth === runtime.health) continue

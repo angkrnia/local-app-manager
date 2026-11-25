@@ -1,4 +1,7 @@
+import { createServer } from 'node:http'
 import { describe, expect, it } from 'vitest'
+import { checkHttpHealth } from '../src/main/services/health-check'
+import { findFreePort } from './helpers/test-env'
 import {
   TunnelUrlDetector,
   extractQuickTunnelUrl,
@@ -132,6 +135,23 @@ describe('Runtime log port extraction', () => {
     expect(extractPortsFromText('PORT=3001')).toEqual([3001])
     expect(extractPortsFromText('Server listening on port 8080')).toEqual([8080])
     expect(extractPortsFromText('Server running at 127.0.0.1:4000')).toEqual([4000])
+    expect(extractPortsFromText('  ➜ Local:    http://localhost:8889/')).toEqual([8889])
+  })
+
+  it('rejects HTTP 426 Upgrade Required endpoints during health checks', async () => {
+    const port = await findFreePort()
+    const server = createServer((_req, res) => {
+      res.writeHead(426, { 'Content-Type': 'text/plain', Upgrade: 'websocket' })
+      res.end('Upgrade Required')
+    })
+    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve))
+    try {
+      const result = await checkHttpHealth({ host: '127.0.0.1', port, protocol: 'http' })
+      expect(result.healthy).toBe(false)
+      expect(result.statusCode).toBe(426)
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   })
 
   it('ignores timestamps, dates, out-of-range numbers, and deduplicates across pushes', () => {

@@ -14,8 +14,13 @@ export interface RawListeningPort {
   pid: number
 }
 
-const DEBUGGER_PORTS = new Set([9229, 9222, 9230])
+const AUXILIARY_PORTS = new Set([9229, 9222, 9230, 24678, 24679, 24680])
 const LOOPBACK_OR_WILDCARD_HOSTS = new Set(['127.0.0.1', '0.0.0.0', '::1', '[::1]', '::', '[::]', '*'])
+
+/** Returns true for debugger or bundler HMR WebSocket-only ports. */
+export function isAuxiliaryPort(port: number): boolean {
+  return AUXILIARY_PORTS.has(port)
+}
 
 const PROTECTED_PROCESSES = new Set([
   'system',
@@ -237,20 +242,20 @@ export async function findListeningPortsForProcessTree(rootPid: number): Promise
     listRawListeningPorts()
   ])
 
-  const byPort = new Map<number, { port: number; isLoopbackOrWildcard: boolean; isDebugger: boolean }>()
+  const byPort = new Map<number, { port: number; isLoopbackOrWildcard: boolean; isAuxiliary: boolean }>()
   for (const entry of rawPorts) {
     if (!descendants.has(entry.pid)) continue
     const isLoopbackOrWildcard = LOOPBACK_OR_WILDCARD_HOSTS.has(entry.localAddress.toLowerCase())
-    const isDebugger = DEBUGGER_PORTS.has(entry.port)
+    const isAuxiliary = AUXILIARY_PORTS.has(entry.port)
     const existing = byPort.get(entry.port)
     if (!existing || (isLoopbackOrWildcard && !existing.isLoopbackOrWildcard)) {
-      byPort.set(entry.port, { port: entry.port, isLoopbackOrWildcard, isDebugger })
+      byPort.set(entry.port, { port: entry.port, isLoopbackOrWildcard, isAuxiliary })
     }
   }
 
   return [...byPort.values()]
     .sort((a, b) => {
-      if (a.isDebugger !== b.isDebugger) return a.isDebugger ? 1 : -1
+      if (a.isAuxiliary !== b.isAuxiliary) return a.isAuxiliary ? 1 : -1
       if (a.isLoopbackOrWildcard !== b.isLoopbackOrWildcard) return a.isLoopbackOrWildcard ? -1 : 1
       return a.port - b.port
     })

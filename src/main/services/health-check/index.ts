@@ -1,13 +1,14 @@
 import http from 'node:http'
 import https from 'node:https'
 import type { LocalProtocol } from '@shared/types'
-import { isPortInUse, sleep } from '../../utils/net'
+import { getProbeHosts, isPortInUse, sleep } from '../../utils/net'
 
 export interface HealthCheckResult {
   healthy: boolean
   statusCode: number | null
   latencyMs: number
   error: string | null
+  resolvedHost?: string | null
 }
 
 export interface WaitForHealthOptions {
@@ -26,17 +27,31 @@ export interface WaitForHealthResult {
 }
 
 /**
- * Performs an HTTP health probe against a local application. Any response with
- * a status below 500 counts as healthy (404/401 still mean the server is up).
+ * Determines whether an HTTP response indicates a live web application rather
+ * than a WebSocket-only HMR endpoint (which typically replies with 426 Upgrade Required).
  */
-export function checkHttpHealth(options: {
+export function isHealthyHttpResponse(
+  statusCode: number | null,
+  headers: http.IncomingHttpHeaders
+): boolean {
+  if (statusCode === null || statusCode >= 500 || statusCode === 426) {
+    return false
+  }
+  const upgrade = String(headers.upgrade ?? '').toLowerCase()
+  if (statusCode >= 400 && upgrade.includes('websocket')) {
+    return false
+  }
+  return true
+}
+
+function probeSingleHostHttpHealth(options: {
   host: string
   port: number
   protocol: LocalProtocol
-  path?: string
-  timeoutMs?: number
+  path: string
+  timeoutMs: number
 }): Promise<HealthCheckResult> {
-  const { host, port, protocol, path = '/', timeoutMs = 4_000 } = options
+  const { host, port, protocol, path, timeoutMs } = options
   const startedAt = Date.now()
   const transport = protocol === 'https' ? https : http
 
@@ -67,20 +82,23 @@ export function checkHttpHealth(options: {
         },
         (response) => {
           const statusCode = response.statusCode ?? null
+          const healthy = isHealthyHttpResponse(statusCode, response.headers)
           response.resume()
           response.destroy()
           finish({
-            healthy: statusCode !== null && statusCode < 500,
+            healthy,
             statusCode,
-            error:
-              statusCode !== null && statusCode < 500
-                ? null
+            resolvedHost: healthy ? host : null,
+            error: healthy
+              ? null
+              : statusCode === 426
+                ? 'Endpoint requires WebSocket upgrade (HTTP 426)'
                 : `Server responded with HTTP ${statusCode ?? 'unknown'}`
           })
         }
       )
     } catch (error) {
-      finish({ healthy: false, statusCode: null, error: (error as Error).message })
+      finish({ healthy: false, statusCode: null, resolvedHost: null, error: (error as Error).message })
       return
     }
 
@@ -88,10 +106,57 @@ export function checkHttpHealth(options: {
       request.destroy(new Error(`Health check timed out after ${timeoutMs}ms`))
     })
     request.on('error', (error) => {
-      finish({ healthy: false, statusCode: null, error: error.message })
+      finish({ healthy: false, statusCode: null, resolvedHost: null, error: error.message })
     })
     request.end()
   })
+}
+
+/**
+ * Performs an HTTP health probe against a local application. Any response with
+ * a status below 500 (excluding WebSocket-only 426 endpoints) counts as healthy.
+ * Loopback hosts automatically try both IPv4 and IPv6.
+ */
+export async function checkHttpHealth(options: {
+  host: string
+  port: number
+  protocol: LocalProtocol
+  path?: string
+  timeoutMs?: number
+}): Promise<HealthCheckResult> {
+  const { host, port, protocol, path = '/', timeoutMs = 4_000 } = options
+  const hosts = getProbeHosts(host)
+  const startedAt = Date.now()
+  let primaryResult: HealthCheckResult | null = null
+  let httpResponseResult: HealthCheckResult | null = null
+
+  for (const candidateHost of hosts) {
+    const remaining = Math.max(400, timeoutMs - (Date.now() - startedAt))
+    const result = await probeSingleHostHttpHealth({
+      host: candidateHost,
+      port,
+      protocol,
+      path,
+      timeoutMs: remaining
+    })
+    if (result.healthy) {
+      return result
+    }
+    if (!primaryResult) {
+      primaryResult = result
+    }
+    if (result.statusCode !== null) {
+      httpResponseResult = result
+    }
+  }
+
+  return httpResponseResult ?? primaryResult ?? {
+    healthy: false,
+    statusCode: null,
+    latencyMs: Date.now() - startedAt,
+    error: `No response from ${host}:${port}`,
+    resolvedHost: null
+  }
 }
 
 export function checkTcpHealth(host: string, port: number, timeoutMs = 2_000): Promise<HealthCheckResult> {
